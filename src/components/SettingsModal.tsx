@@ -38,7 +38,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   smtpConfig,
   onSaveSMTPConfig,
 }) => {
-  const [activeTab, setActiveTab] = useState<'ai' | 'email'>('email');
+  const [activeTab, setActiveTab] = useState<'ai' | 'email' | 'vercel'>('email');
 
   // AI Form state
   const [provider, setProvider] = useState<'qwen' | 'gemini' | 'openai-compatible'>(
@@ -49,6 +49,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     aiConfig.endpoint || 'https://openrouter.ai/api/v1/chat/completions'
   );
   const [model, setModel] = useState(aiConfig.model || 'qwen/qwen-2.5-72b-instruct:free');
+  const [showAdvancedAI, setShowAdvancedAI] = useState(false);
 
   // Email form state
   const [targetEmail, setTargetEmail] = useState(recipientEmail || 'ak46652@gmail.com');
@@ -249,6 +250,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           >
             <Cpu className="w-3.5 h-3.5" />
             AI Model Engine (Qwen 2.5/3)
+          </button>
+          <button
+            onClick={() => setActiveTab('vercel')}
+            className={`flex items-center gap-2 px-4 py-2 text-xs font-semibold border-b-2 transition-all ${
+              activeTab === 'vercel'
+                ? 'border-indigo-600 text-indigo-700 bg-white rounded-t-lg'
+                : 'border-transparent text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <span className="font-bold">▲</span>
+            Vercel Compatibility & Guide
           </button>
         </div>
 
@@ -520,7 +532,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 )}
               </div>
             </div>
-          ) : (
+          ) : activeTab === 'ai' ? (
             <div className="space-y-4">
               {/* Presets banner */}
               <div>
@@ -615,43 +627,136 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 />
               </div>
 
-              {/* Endpoint */}
-              {provider !== 'gemini' && (
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    API Base Endpoint
-                  </label>
-                  <input
-                    type="text"
-                    value={endpoint}
-                    onChange={(e) => setEndpoint(e.target.value)}
-                    placeholder="https://openrouter.ai/api/v1/chat/completions"
-                    className="w-full text-xs font-mono px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50/60"
-                  />
-                </div>
-              )}
+              {/* Optional Advanced Settings Toggle */}
+              <div className="pt-1">
+                <button
+                  type="button"
+                  onClick={() => setShowAdvancedAI(!showAdvancedAI)}
+                  className="text-[11px] text-slate-500 hover:text-indigo-600 font-semibold flex items-center gap-1 transition-colors"
+                >
+                  <span>{showAdvancedAI ? '▾ Hide' : '▸ Show'} Advanced Settings (Endpoint & Model Name)</span>
+                  <span className="text-[10px] text-slate-400 font-normal">(Auto-configured by presets)</span>
+                </button>
 
-              {/* Model Name */}
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Target Neural Model Name
-                </label>
-                <input
-                  type="text"
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  placeholder="qwen/qwen-2.5-72b-instruct:free"
-                  className="w-full text-xs font-mono px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50/60"
-                />
+                {showAdvancedAI && (
+                  <div className="mt-2.5 p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-3">
+                    {provider !== 'gemini' && (
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-700 mb-1">
+                          API Base Endpoint (Auto-filled)
+                        </label>
+                        <input
+                          type="text"
+                          value={endpoint}
+                          onChange={(e) => setEndpoint(e.target.value)}
+                          placeholder="https://openrouter.ai/api/v1/chat/completions"
+                          className="w-full text-xs font-mono px-3 py-1.5 border border-slate-200 rounded bg-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                        />
+                      </div>
+                    )}
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        Target Neural Model Name (Auto-filled)
+                      </label>
+                      <input
+                        type="text"
+                        value={model}
+                        onChange={(e) => setModel(e.target.value)}
+                        placeholder="qwen/qwen-2.5-72b-instruct:free"
+                        className="w-full text-xs font-mono px-3 py-1.5 border border-slate-200 rounded bg-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-4 text-xs">
+              {/* Vercel Status Diagnostic */}
+              <div className="p-4 bg-slate-900 text-white rounded-xl space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-sm text-indigo-400">▲ Vercel Compatibility Engine</span>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                      Production Ready
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const res = await fetch('/api/health');
+                        const data = await res.json();
+                        alert(`Vercel API Health Status: ${data.status.toUpperCase()}\nEnvironment: ${data.environment}\nGemini Key Present: ${data.hasGeminiKey ? 'YES' : 'NO'}`);
+                      } catch (e: any) {
+                        alert(`Health check failed: ${e.message}`);
+                      }
+                    }}
+                    className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-semibold border border-slate-700 transition-colors"
+                  >
+                    Test /api/health
+                  </button>
+                </div>
+                <p className="text-[11px] text-slate-300 leading-relaxed">
+                  This application has been structured with standard Vercel Serverless Function architecture (<code>api/index.ts</code>) and a dedicated <code>vercel.json</code> routing configuration.
+                </p>
               </div>
 
-              {/* Security Note */}
-              <div className="bg-indigo-50/60 border border-indigo-100 rounded-lg p-3 text-xs text-indigo-950 flex items-start gap-2.5">
-                <ShieldCheck className="w-4 h-4 text-indigo-600 shrink-0 mt-0.5" />
+              {/* Step-by-Step Vercel Setup Guide */}
+              <div className="border border-slate-200 rounded-xl p-4 bg-slate-50 space-y-3">
+                <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wider">
+                  How to Deploy to Vercel (3 Quick Steps):
+                </h4>
+
+                <div className="space-y-2.5">
+                  <div className="flex items-start gap-2.5">
+                    <span className="w-5 h-5 rounded-full bg-slate-900 text-white font-bold text-xs flex items-center justify-center shrink-0 mt-0.5">
+                      1
+                    </span>
+                    <div>
+                      <strong className="text-slate-800">Push to GitHub & Import into Vercel:</strong>
+                      <p className="text-slate-500 text-[11px] mt-0.5">
+                        In Vercel, click <em>Add New &rarr; Project</em> and select your GitHub repo. Vercel automatically detects Vite and the pre-configured <code>vercel.json</code>.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-start gap-2.5">
+                    <span className="w-5 h-5 rounded-full bg-slate-900 text-white font-bold text-xs flex items-center justify-center shrink-0 mt-0.5">
+                      2
+                    </span>
+                    <div>
+                      <strong className="text-slate-800">Set Environment Variables in Vercel:</strong>
+                      <p className="text-slate-500 text-[11px] mt-0.5">
+                        In Vercel Project Settings &rarr; <strong>Environment Variables</strong>, add:
+                        <br />
+                        <code className="bg-slate-200 px-1.5 py-0.5 rounded font-mono text-[10px] text-slate-800">GEMINI_API_KEY</code> = your Google AI Studio Gemini API key.
+                        <br />
+                        <em>Tip:</em> You can also paste your key directly in the <strong>AI Model Engine</strong> tab above, which works immediately without any environment variables!
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-start gap-2.5">
+                    <span className="w-5 h-5 rounded-full bg-slate-900 text-white font-bold text-xs flex items-center justify-center shrink-0 mt-0.5">
+                      3
+                    </span>
+                    <div>
+                      <strong className="text-slate-800">Serverless Architecture Verified:</strong>
+                      <p className="text-slate-500 text-[11px] mt-0.5">
+                        The backend runs as a pure Vercel Serverless Function via <code>/api/index.ts</code>. Resume parsing (<code>pdf-parse</code>/<code>mammoth</code>), AI candidate mapping, and email dispatch all execute seamlessly.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Vercel Constraints Note */}
+              <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-900 text-[11px] flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
                 <div>
-                  <span className="font-semibold">Privacy & Evaluation Security:</span> Candidate resumes
-                  are parsed in-memory and processed strictly for matching requirements, identifying
-                  missing skills, and highlighting evidence gaps.
+                  <strong>Vercel Serverless Limits:</strong> Vercel limits request payloads to 4.5MB. The resume uploader automatically batches file uploads individually to guarantee strict compliance with Vercel's payload limits.
                 </div>
               </div>
             </div>

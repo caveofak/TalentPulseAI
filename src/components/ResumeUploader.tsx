@@ -41,28 +41,47 @@ export const ResumeUploader: React.FC<ResumeUploaderProps> = ({
   const handleFiles = async (files: FileList | null) => {
     if (!files || files.length === 0 || disabled) return;
 
-    const formData = new FormData();
-    for (let i = 0; i < files.length; i++) {
-      formData.append('resumes', files[i]);
+    const totalFiles = files.length;
+    const uploadedCandidates: ParsedCandidate[] = [];
+    let hasError = false;
+
+    // Process files individually to strictly comply with Vercel Serverless 4.5MB payload limits
+    for (let i = 0; i < totalFiles; i++) {
+      const file = files[i];
+      if (file.size > 4.5 * 1024 * 1024) {
+        alert(`Warning: "${file.name}" is ${Math.round(file.size / (1024 * 1024))}MB. On Vercel Serverless, maximum payload is 4.5MB. Please upload a smaller PDF/Word document.`);
+        continue;
+      }
+
+      const formData = new FormData();
+      formData.append('resumes', file);
+
+      try {
+        const response = await fetch('/api/parse-resumes', {
+          method: 'POST',
+          body: formData,
+        });
+
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          throw new Error(errData.error || `Upload failed with status ${response.status}`);
+        }
+
+        const data = await response.json();
+        if (data.candidates && data.candidates.length > 0) {
+          uploadedCandidates.push(...data.candidates);
+        }
+      } catch (err: any) {
+        console.error(`Failed to parse resume "${file.name}":`, err);
+        hasError = true;
+      }
     }
 
-    try {
-      const response = await fetch('/api/parse-resumes', {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!response.ok) {
-        throw new Error(`Upload failed with status ${response.status}`);
-      }
-
-      const data = await response.json();
-      if (data.candidates && data.candidates.length > 0) {
-        onAddCandidates(data.candidates);
-      }
-    } catch (err: any) {
-      console.error('Failed to parse resumes:', err);
-      alert(`Error parsing resumes: ${err.message}`);
+    if (uploadedCandidates.length > 0) {
+      onAddCandidates(uploadedCandidates);
+    }
+    if (hasError && uploadedCandidates.length === 0) {
+      alert('Error parsing uploaded file(s). Please verify the file is a valid PDF or DOCX.');
     }
   };
 
