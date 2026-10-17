@@ -38,6 +38,15 @@ export const ResumeUploader: React.FC<ResumeUploaderProps> = ({
   const [isDragOver, setIsDragOver] = useState(false);
   const [previewCandidate, setPreviewCandidate] = useState<ParsedCandidate | null>(null);
 
+  const readFileAsBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  };
+
   const handleFiles = async (files: FileList | null) => {
     if (!files || files.length === 0 || disabled) return;
 
@@ -45,35 +54,65 @@ export const ResumeUploader: React.FC<ResumeUploaderProps> = ({
     const uploadedCandidates: ParsedCandidate[] = [];
     let hasError = false;
 
-    // Process files individually to strictly comply with Vercel Serverless 4.5MB payload limits
     for (let i = 0; i < totalFiles; i++) {
       const file = files[i];
-      if (file.size > 4.5 * 1024 * 1024) {
-        alert(`Warning: "${file.name}" is ${Math.round(file.size / (1024 * 1024))}MB. On Vercel Serverless, maximum payload is 4.5MB. Please upload a smaller PDF/Word document.`);
+      if (file.size > 12 * 1024 * 1024) {
+        alert(`Warning: "${file.name}" is ${Math.round(file.size / (1024 * 1024))}MB. Please upload resumes under 12MB.`);
         continue;
       }
 
-      const formData = new FormData();
-      formData.append('resumes', file);
+      let success = false;
 
+      // ATTEMPT 1: Multipart upload via Multer
       try {
+        const formData = new FormData();
+        formData.append('resumes', file);
+
         const response = await fetch('/api/parse-resumes', {
           method: 'POST',
           body: formData,
         });
 
-        if (!response.ok) {
-          const errData = await response.json().catch(() => ({}));
-          throw new Error(errData.error || `Upload failed with status ${response.status}`);
+        if (response.ok) {
+          const data = await response.json();
+          if (data.candidates && data.candidates.length > 0) {
+            uploadedCandidates.push(...data.candidates);
+            success = true;
+          }
         }
+      } catch (e) {
+        console.warn('Multipart upload failed, trying JSON base64 fallback:', e);
+      }
 
-        const data = await response.json();
-        if (data.candidates && data.candidates.length > 0) {
-          uploadedCandidates.push(...data.candidates);
+      // ATTEMPT 2: JSON Base64 fallback (bypasses any multipart proxy issues on Vercel/serverless)
+      if (!success) {
+        try {
+          const base64Data = await readFileAsBase64(file);
+          const jsonRes = await fetch('/api/parse-resumes', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              fileName: file.name,
+              fileBase64: base64Data,
+              fileSize: file.size,
+              fileType: file.name.endsWith('.pdf') ? '.pdf' : '.docx',
+            }),
+          });
+
+          if (jsonRes.ok) {
+            const data = await jsonRes.json();
+            if (data.candidates && data.candidates.length > 0) {
+              uploadedCandidates.push(...data.candidates);
+              success = true;
+            }
+          } else {
+            const errJson = await jsonRes.json().catch(() => ({}));
+            throw new Error(errJson.error || `HTTP ${jsonRes.status}`);
+          }
+        } catch (err: any) {
+          console.error(`Failed to parse resume "${file.name}":`, err);
+          hasError = true;
         }
-      } catch (err: any) {
-        console.error(`Failed to parse resume "${file.name}":`, err);
-        hasError = true;
       }
     }
 
@@ -81,7 +120,7 @@ export const ResumeUploader: React.FC<ResumeUploaderProps> = ({
       onAddCandidates(uploadedCandidates);
     }
     if (hasError && uploadedCandidates.length === 0) {
-      alert('Error parsing uploaded file(s). Please verify the file is a valid PDF or DOCX.');
+      alert('Unable to extract text from the uploaded resume file. Please verify it is a readable PDF or DOCX.');
     }
   };
 

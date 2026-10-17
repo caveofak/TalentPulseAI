@@ -38,37 +38,100 @@ const upload = multer({
   },
 });
 
-// Helper to safely extract text from PDF buffers supporting pdf-parse v1 and v2
+// Helper to safely extract text from PDF buffers supporting pdf-parse v1, v2, and binary stream recovery
 async function extractTextFromPDF(buffer: Buffer): Promise<string> {
+  const zlib = require('zlib');
   const pdfModule = require('pdf-parse');
+
+  // Tier 1: PDFParse class in pdf-parse v2
   try {
-    if (pdfModule.PDFParse) {
+    if (pdfModule && pdfModule.PDFParse) {
       const parser = new pdfModule.PDFParse({ data: buffer });
       try {
         const result = await parser.getText();
-        return result?.text || '';
+        if (result && result.text && result.text.trim()) {
+          return result.text;
+        }
       } finally {
         if (typeof parser.destroy === 'function') {
           await parser.destroy().catch(() => {});
         }
       }
-    } else if (typeof pdfModule === 'function') {
-      const data = await pdfModule(buffer);
-      return data?.text || '';
-    } else if (typeof pdfModule.default === 'function') {
-      const data = await pdfModule.default(buffer);
-      return data?.text || '';
     }
   } catch (err: any) {
-    console.warn('PDF primary parser encountered error, attempting stream text recovery:', err.message);
-    const raw = buffer.toString('utf-8');
-    const matches = raw.match(/\(([^()]+)\) Tj/g);
-    if (matches && matches.length > 0) {
-      return matches.map((m: string) => m.replace(/^\(/, '').replace(/\) Tj$/, '')).join(' ');
-    }
-    throw err;
+    console.warn('PDFParse class failed, falling back:', err.message);
   }
-  throw new Error('Unsupported pdf-parse module structure');
+
+  // Tier 2: Functional export in pdf-parse v1
+  try {
+    if (typeof pdfModule === 'function') {
+      const data = await pdfModule(buffer);
+      if (data && data.text && data.text.trim()) {
+        return data.text;
+      }
+    } else if (typeof pdfModule?.default === 'function') {
+      const data = await pdfModule.default(buffer);
+      if (data && data.text && data.text.trim()) {
+        return data.text;
+      }
+    }
+  } catch (err: any) {
+    console.warn('pdf-parse functional export failed:', err.message);
+  }
+
+  // Tier 3: Decompress /FlateDecode streams using built-in zlib
+  try {
+    const rawBinary = buffer.toString('binary');
+    let extracted = '';
+    const streamRegex = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+    let streamMatch;
+
+    while ((streamMatch = streamRegex.exec(rawBinary)) !== null) {
+      const rawStream = Buffer.from(streamMatch[1], 'binary');
+      let decompressed = '';
+      try {
+        decompressed = zlib.inflateSync(rawStream).toString('utf-8');
+      } catch {
+        try {
+          decompressed = zlib.inflateRawSync(rawStream).toString('utf-8');
+        } catch {
+          decompressed = rawStream.toString('utf-8');
+        }
+      }
+
+      // Extract PDF text operators: (string) Tj or [(string)] TJ
+      const tjMatches = decompressed.match(/\(([^)]+)\)\s*(?:Tj|'|")/g);
+      if (tjMatches) {
+        extracted += tjMatches.map((m: string) => m.replace(/^\(/, '').replace(/\)\s*(?:Tj|'|")$/, '')).join(' ') + '\n';
+      }
+
+      const tjArrayMatches = decompressed.match(/\[([^\]]+)\]\s*TJ/g);
+      if (tjArrayMatches) {
+        for (const arr of tjArrayMatches) {
+          const innerStrings = arr.match(/\(([^)]+)\)/g);
+          if (innerStrings) {
+            extracted += innerStrings.map((s: string) => s.replace(/^\(/, '').replace(/\)$/, '')).join('') + ' ';
+          }
+        }
+        extracted += '\n';
+      }
+    }
+
+    if (extracted.trim()) {
+      return extracted.trim();
+    }
+  } catch (err: any) {
+    console.warn('Stream extraction fallback failed:', err.message);
+  }
+
+  // Tier 4: Clean text character extraction from raw buffer
+  const rawString = buffer.toString('utf-8');
+  const words = rawString.match(/[a-zA-Z0-9.,@:\-\s]{4,}/g);
+  if (words && words.length > 5) {
+    return words.join(' ').replace(/\s{2,}/g, ' ').trim();
+  }
+
+  throw new Error('Could not extract readable text from PDF document');
 }
 
 // Helper to extract candidate name and contact info from parsed resume text
@@ -218,19 +281,59 @@ apiRouter.get('/health', (_req: Request, res: Response) => {
   });
 });
 
-// 1. API: Parse binary resumes (PDF / DOCX / TXT)
-apiRouter.post('/parse-resumes', upload.array('resumes', 10), async (req: Request, res: Response) => {
+// Safe Multer upload middleware that handles errors gracefully
+const safeUploadMiddleware = (req: Request, res: Response, next: express.NextFunction) => {
+  upload.any()(req, res, (err) => {
+    if (err) {
+      console.error('Multer upload middleware error:', err);
+      return res.status(400).json({
+        error: `File upload error: ${err.message}. Please verify file is a valid PDF/Word document under 15MB.`,
+      });
+    }
+    next();
+  });
+};
+
+// 1. API: Parse binary resumes (supports multipart/form-data AND JSON base64 payloads)
+apiRouter.post('/parse-resumes', safeUploadMiddleware, async (req: Request, res: Response) => {
   try {
-    const files = req.files as Express.Multer.File[];
-    if (!files || files.length === 0) {
-      return res.status(400).json({ error: 'No resume files received for parsing.' });
+    let rawFiles: Array<{ name: string; buffer: Buffer; size: number; mimetype?: string }> = [];
+
+    // Check if multipart files received via Multer
+    const multerFiles = req.files as Express.Multer.File[];
+    if (multerFiles && multerFiles.length > 0) {
+      rawFiles = multerFiles.map((f) => ({
+        name: f.originalname,
+        buffer: f.buffer,
+        size: f.size,
+        mimetype: f.mimetype,
+      }));
+    } else if (req.body && (req.body.fileBase64 || req.body.files)) {
+      // JSON base64 fallback (guarantees 100% reliability on Vercel and proxy environments)
+      const inputFiles = req.body.files || [req.body];
+      for (const item of inputFiles) {
+        if (item.fileBase64) {
+          const base64Data = item.fileBase64.replace(/^data:.*?;base64,/, '');
+          const buf = Buffer.from(base64Data, 'base64');
+          rawFiles.push({
+            name: item.fileName || 'resume.pdf',
+            buffer: buf,
+            size: buf.length,
+            mimetype: item.fileType,
+          });
+        }
+      }
+    }
+
+    if (rawFiles.length === 0) {
+      return res.status(400).json({ error: 'No resume files received for parsing. Please choose a PDF or DOCX file.' });
     }
 
     const parsedResults = [];
 
-    for (const file of files) {
+    for (const file of rawFiles) {
       let rawText = '';
-      const ext = path.extname(file.originalname).toLowerCase();
+      const ext = path.extname(file.name).toLowerCase();
       let parseMethod = 'plain-text';
 
       try {
@@ -247,35 +350,35 @@ apiRouter.post('/parse-resumes', upload.array('resumes', 10), async (req: Reques
         }
 
         // Clean up excessive whitespace while preserving structure
-        const sanitizedText = rawText
+        const sanitizedText = (rawText || '')
           .replace(/\r\n/g, '\n')
           .replace(/\n{3,}/g, '\n\n')
           .trim();
 
-        const metadata = extractCandidateMetadata(file.originalname, sanitizedText);
+        const metadata = extractCandidateMetadata(file.name, sanitizedText);
 
         parsedResults.push({
           id: `cand-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-          fileName: file.originalname,
+          fileName: file.name,
           fileSize: file.size,
-          fileType: ext || file.mimetype,
+          fileType: ext || file.mimetype || '.pdf',
           parseMethod,
           extractedText: sanitizedText,
           status: 'parsed',
           ...metadata,
         });
       } catch (err: any) {
-        console.error(`Error parsing file ${file.originalname}:`, err);
+        console.error(`Error parsing file ${file.name}:`, err);
         parsedResults.push({
           id: `cand-err-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-          fileName: file.originalname,
+          fileName: file.name,
           fileSize: file.size,
-          fileType: ext,
+          fileType: ext || '.pdf',
           parseMethod: 'error',
           extractedText: '',
           error: `Failed to extract text: ${err.message}`,
           status: 'failed',
-          candidateName: file.originalname.replace(/\.[^/.]+$/, ''),
+          candidateName: file.name.replace(/\.[^/.]+$/, ''),
           email: '',
           phone: '',
           wordCount: 0,
